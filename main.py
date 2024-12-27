@@ -1,8 +1,8 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 import spacy
-import speech_recognition as sr
-import pyttsx3
+# import speech_recognition as sr
+# import pyttsx3
 from datetime import datetime
 import asyncpg
 import google.generativeai as genai
@@ -28,10 +28,10 @@ class AIAgent:
         self.nlp = spacy.load("en_core_web_sm")
         
         # Initialize speech recognition
-        self.recognizer = sr.Recognizer()
+        # self.recognizer = sr.Recognizer()
         
         # Initialize text-to-speech engine
-        self.engine = pyttsx3.init()
+        # self.engine = pyttsx3.init()
         
         # Lead information storage
         self.current_lead = {
