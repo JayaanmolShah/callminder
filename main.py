@@ -7,7 +7,8 @@ from datetime import datetime
 import google.generativeai as genai
 from pydantic import BaseModel
 from config import GEMINI_API_KEY, SUPABASE_URL, SUPABASE_KEY
-# import sounddevice as sd
+import json
+import sounddevice as sd
 import speech_recognition as sr
 import queue
 import time
@@ -17,7 +18,6 @@ import pyttsx4
 import asyncio
 from typing import List, Optional,Dict, Any
 import re
-import pyaudio
 
 END_CALL_PHRASES = {
     "end call", "end the call", "goodbye", "bye", "quit", "stop", "hang up", 
@@ -38,12 +38,13 @@ app.add_middleware(
 genai.configure(api_key=GEMINI_API_KEY)
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")  # Sentence-transformer model
 faiss_index = None
-audio_queue = queue.Queue()
-transcriptions = []
+audio_queue = queue.Queue()  # Queue for audio frames
+transcriptions = []          # List to store transcription results
 recognizer = sr.Recognizer()
-stop_event = Event()
+stop_event = Event()  # Add an event to control the recording thread
 recording_thread = None
 tts_engine = pyttsx4.init()
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -387,52 +388,37 @@ async def speak_text_async(text: str):
             "data": {"is_speaking": False}
         })
 
-def audio_callback(in_data, frames, time, status):
-    audio_queue.put(in_data)
-    return (None, pyaudio.paContinue)
+def audio_callback(indata, frames, time, status):
+    if status:
+        print(f"Audio status: {status}")
+    audio_queue.put(indata.copy())
 
 async def transcribe_audio():
     try:
-        p = pyaudio.PyAudio()
-        stream = p.open(
-            format=pyaudio.paFloat32,
-            channels=1,
-            rate=16000,
-            input=True,
-            frames_per_buffer=1024,
-            stream_callback=audio_callback
-        )
-        
-        stream.start_stream()
-
-        while not stop_event.is_set():
-            if manager.speaking_event.is_set():
-                await asyncio.sleep(0.1)
-                continue
-                
-            audio_data = []
-            start_time = time.time()
-            
-            while time.time() - start_time < 3 and not stop_event.is_set():
-                try:
-                    chunk = audio_queue.get(timeout=0.1)
-                    audio_data.append(chunk)
-                except queue.Empty:
+        with sd.InputStream(channels=1, samplerate=16000, callback=audio_callback):
+            while not stop_event.is_set():
+                if manager.speaking_event.is_set():
+                    await asyncio.sleep(0.1)
                     continue
-
-            if audio_data and not stop_event.is_set():
-                await process_audio_chunks(audio_data)
+                    
+                audio_data = []
+                start_time = time.time()
                 
+                while time.time() - start_time < 3 and not stop_event.is_set():
+                    try:
+                        chunk = audio_queue.get(timeout=0.1)
+                        audio_data.append(chunk)
+                    except queue.Empty:
+                        continue
+
+                if audio_data and not stop_event.is_set():
+                    await process_audio_chunks(audio_data)
+                    
     except asyncio.CancelledError:
         print("Transcription task cancelled")
     except Exception as e:
         print(f"Audio stream error: {e}")
     finally:
-        if 'stream' in locals():
-            stream.stop_stream()
-            stream.close()
-        if 'p' in locals():
-            p.terminate()
         print("Audio transcription ended")
 
 async def process_audio_chunks(audio_data):
@@ -440,27 +426,27 @@ async def process_audio_chunks(audio_data):
         if not audio_data:
             return
             
-        # Convert audio data to numpy array
-        audio = np.frombuffer(b''.join(audio_data), dtype=np.float32)
-        
+        audio = np.concatenate(audio_data)
         if np.max(np.abs(audio)) < 0.01:  # Check if audio is too quiet
             return
             
-        # Convert to int16 for speech recognition
-        audio_int16 = (audio * 32767).astype(np.int16)
+        audio_bytes = (audio * 32767).astype(np.int16).tobytes()
         
-        audio_source = sr.AudioData(audio_int16.tobytes(), 16000, 2)
+        audio_source = sr.AudioData(audio_bytes, 16000, 2)
         text = recognizer.recognize_google(audio_source)
         
         if text.strip():
-            # Check for end call phrases
+            # Check if the user wants to end the call
             if any(phrase in text.lower() for phrase in END_CALL_PHRASES):
+                # Send farewell message before ending
                 farewell = "Thank you for speaking with Toshal Infotech. Have a great day! Goodbye."
                 await manager.broadcast({
                     "type": "ai_response",
                     "data": {"response": farewell}
                 })
                 await speak_text_async(farewell)
+                
+                # Call stop_conversation endpoint
                 await stop_conversation()
                 return
 
